@@ -15,6 +15,7 @@
 char *backgroundPid = "";
 char *foregroundPid = "0";
 int nwords = 0;
+int expanded_param = 0;
 
 char *words[MAX_WORDS];
 size_t wordsplit(char const *line);
@@ -26,7 +27,7 @@ int main(int argc, char *argv[])
   FILE *input = stdin;
   char *input_fn = "(stdin)";
   if (argc == 2) {
-    input_fn = "foo.txt";
+    input_fn = argv[1];
     input = fopen(input_fn, "re");
     if (!input) err(1, "%s", input_fn);
   } else if (argc > 2) {
@@ -54,7 +55,12 @@ prompt:
 
     // read line
     ssize_t line_len = getline(&line, &n, input);
-    if (line_len < 0) err(1, "%s", input_fn);  // end of file casues an error***
+    // exit if file is at end
+    if ((line_len < 0) && (feof(input))) {
+      exit(atoi(foregroundPid));
+    }
+    if (line_len < 0) err(1, "%s", input_fn);  
+
 
     size_t nwords = wordsplit(line);
     for (size_t i = 0; i < nwords; ++i) {
@@ -62,6 +68,17 @@ prompt:
       char *exp_word = expand(words[i]);
       free(words[i]);
       words[i] = exp_word;
+      if (expanded_param == 1){
+        // get env value
+        char *new_word = getenv(words[i]);
+        if (new_word == NULL){
+          // set to empty str if null
+          new_word = "";
+        }
+        free(words[i]);
+        words[i] = new_word;
+        expanded_param = 0;
+      }
       //fprintf(stderr, "Expanded Word %zu: %s\n", i, words[i]);
     }
 
@@ -74,21 +91,20 @@ prompt:
         goto prompt;
       } else if (nwords == 2){
         // exit command is given
-          if (isdigit(*words[1])){
-            int code = words[1];
-            exit((int) code);  // int to str
+          if (isdigit(*words[1])) {
+            exit(atoi(words[1]));  // atoi makes int to str
           } else {
             // exit arg is not an int
             fprintf(stderr, "Exit command is not an int\n");
             goto prompt;
         }} else {
-          // not exit arg give. exit default
-          exit((int) *foregroundPid);
+          // not exit arg given. exit default
+          exit(atoi(foregroundPid));
         }
     // case 2: cd
     } else if (strcmp(words[0], "cd") == 0) {
         if (nwords == 2) {
-          chdir(words[1]); // NOT WORKING????
+          chdir(words[1]);
           goto prompt;
         } else if (nwords == 1) {
           chdir(getenv("HOME"));
@@ -251,9 +267,10 @@ expand(char const *word)
     else if (c == '$') build_str(pid, NULL);
     else if (c == '?') build_str(foregroundPid, NULL);
     else if (c == '{') {
-      build_str("<Parameter: ", NULL);
+      build_str("", NULL);
       build_str(start + 2, end - 1);
-      build_str(">", NULL);
+      build_str("", NULL);
+      expanded_param = 1;
     }
     pos = end;
     c = param_scan(pos, &start, &end);
