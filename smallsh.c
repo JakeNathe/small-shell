@@ -9,6 +9,9 @@
 #include <string.h>
 #include <signal.h>
 #include <inttypes.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+#include <fcntl.h>
 
 #ifndef MAX_WORDS
 #define MAX_WORDS 512
@@ -23,18 +26,20 @@ int expanded_param_flag = 0;
 int nwords = 0;
 char * input_file = NULL;
 char * output_file = NULL;
-int inputFD = 0;
-int outputFD = 0;
+int append_flag = 0;
+int sourceFD = 0;
+int targetFD = 0;
 
 char *words[MAX_WORDS];
 size_t wordsplit(char const *line);
 char * expand(char const *word);
+void condenseArray(int index, char * words[MAX_WORDS], int length);
 
-// Ignore SIGINT
-void sigint_handler(int signo) {}
 
-// Ignore SIGTSTP
-void sigtstp_handler(int signo){}
+void handle_SIGINT(int signo){
+  // no action
+}
+
 
 /* MAIN FUNCTION */
 int main(int argc, char *argv[])
@@ -50,6 +55,16 @@ int main(int argc, char *argv[])
     errx(1, "Too many arguments\n");
   }
 
+  // Set up signals
+  struct sigaction SIGINT_action ={0}, SIGTSTP_action = {0}, ignore_action = {0};
+  // no signal handling unless interactive mode (stdin)
+  ignore_action.sa_handler = SIG_IGN;
+  // Ignore SIGTSTPif in interactive mode
+  if (input == stdin) {
+    // Ignore SIGTSTP
+    sigaction(SIGTSTP, &ignore_action, NULL);
+  }
+
   // Initialize line and n 
   char *line = NULL;
   size_t n = 0;
@@ -61,9 +76,7 @@ start:
     expanded_param_flag = 0;
     input_file = NULL;
     output_file = NULL;
-    // ignore signals
-    signal(SIGINT, sigint_handler);
-    signal(SIGTSTP, sigtstp_handler);
+    int append_flag = 0;
     // clear prev array
     memset(words, 0, sizeof(words));
     
@@ -85,23 +98,43 @@ start:
       }
     }
     
-    /* Interactive mode Prompt */
+    /* Interactive mode Prompt and SIGINT settings*/
     if (input == stdin) {
+      // set PS!
       char *PS1 = getenv("PS1");
       if (PS1 == NULL){
         PS1 = "";
       }
       fprintf(stderr, "%s", PS1);
+
+      // set sig handler to when reading line of input
+      SIGINT_action.sa_handler = handle_SIGINT;
+      // Block all catchable signals while handle_SIGINT is running
+      sigfillset(&SIGINT_action.sa_mask);
+      // No flags set
+      SIGINT_action.sa_flags = 0;
+      sigaction(SIGINT, &SIGINT_action, NULL);
     }
 
     // read line
     ssize_t line_len = getline(&line, &n, input);
+
+    // if line blocked by a signal
+      //errno=EINTR
+      // CLEARERR()
+      // \n
+      // goto start
+
     // exit if file is at end
     if ((line_len < 0) && (feof(input))) {
       exit(atoi(foreground_pid));
     }
     if (line_len < 0) err(1, "%s", input_fn);  
 
+    // Ignore SIGINT again
+    if (input == stdin) {
+      sigaction(SIGINT, &ignore_action, NULL);
+    }
     
     // split and expand words
     size_t nwords = wordsplit(line);
@@ -145,8 +178,37 @@ start:
 
     // check for redirection <, >, or >> as a word
     // check for output redirection.
-    if ((nwords > 2) && (strcmp(words[nwords-1], "<") == 0)) {
-      //
+    int i = 0;
+    while (i < nwords-1) {
+      int j = i;
+      if (strcmp(words[i], "<") == 0) {
+        // read file
+        input_file = words[i+1];
+        // now move elements forwards so null values are at end
+        condenseArray(j, words, nwords);
+        nwords = nwords -2;
+      } 
+      else if (strcmp(words[i], ">") == 0) {
+        // output to file
+        output_file = words[i+1];
+        // now move elements forwards so null values are at end
+        condenseArray(j, words, nwords);
+        nwords = nwords -2;
+      }
+      else if (strcmp(words[i], ">>") == 0) {
+        // append to file
+        output_file = words[i+1];
+        // now move elements forwards so null values are at end
+        condenseArray(j, words, nwords);
+        nwords = nwords -2;
+        append_flag = 1;
+      }
+      else{ i++; }
+    }
+
+    // ignore all below code if no words were entered
+    if (nwords == 0) {
+      goto start;
     }
 
     /* 
@@ -195,18 +257,74 @@ start:
           break;
         }
         case 0: {
-          // Child process
+          /*
+            CHILD PROCESS
+          */
+
+          // Reset signals for child
+          ///
+          /// oldact in SIGACTION(2).
+          //
+
+          // check for input file
+          if (input_file != NULL) {
+            sourceFD = open(input_file, O_RDONLY);
+            if (sourceFD == -1) {
+              perror("source open()");
+              exit(1);
+            }
+            // redirect stdin to source file
+            int result = dup2(sourceFD, 0);
+            if (result == -1) {
+              perror("source dup2()");
+              exit(2);
+            }
+          }
+
+          // check for output file
+          if (output_file != NULL) {
+            if (append_flag == 0) {
+              targetFD = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+            } else {
+              targetFD = open(output_file, O_WRONLY | O_CREAT | O_APPEND, 0777);
+            }
+            if (targetFD == -1) {
+              perror("target open()");
+              exit(1);
+            }
+            // redirect stdout to target file
+            int result = dup2(targetFD, 1);
+            if (result == -1) {
+              perror("target dup2()");
+              exit(2);
+            }
+          }
+
+          // execute command
           execvp(words[0], words);
+          // close files and exit
+          if (input_file != NULL) {
+            close(sourceFD);
+          }
+          if (output_file != NULL) {
+            close(targetFD);
+          }
           exit(0);
           break;
         }
+
         default: {
           // Parent process
           // wait for child to process command if foreground
           if (background_flag == 0) {
             spawn_pid = waitpid(spawn_pid, &childExitStatus, 0);
             foreground_pid = malloc(sizeof(int) * 8);
-            sprintf(foreground_pid, "%d", WEXITSTATUS(childExitStatus));
+            if (WIFEXITED(childExitStatus)) {
+              sprintf(foreground_pid, "%d", WEXITSTATUS(childExitStatus));
+            } 
+            else if (WIFSIGNALED(childExitStatus)) {
+              sprintf(foreground_pid, "%d", 128 + WSTOPSIG(childExitStatus));
+            }
           } else {
             // background
             background_pid = malloc(sizeof(int) * 8);
@@ -353,4 +471,17 @@ expand(char const *word)
     build_str(pos, start);
   }
   return build_str(start, NULL);
+}
+
+/*
+Moves all array elements forward wehn deleting redirections
+*/
+void condenseArray(int index, char * words[MAX_WORDS], int length) {
+  while (index < length-2) {
+    words[index] = words[index+2];
+    index++;
+  }
+  // update last 2 to be null for removed values. no need to update length since NULL values
+  words[index] = NULL;
+  words[index+1] = NULL;
 }
