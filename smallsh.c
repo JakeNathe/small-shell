@@ -34,12 +34,10 @@ char *words[MAX_WORDS];
 size_t wordsplit(char const *line);
 char * expand(char const *word);
 void condenseArray(int index, char * words[MAX_WORDS], int length);
+void manageBackgroundProcesses();
 
 
-void handle_SIGINT(int signo){
-  // no action
-}
-
+void handle_SIGINT(int signo){}
 
 /* MAIN FUNCTION */
 int main(int argc, char *argv[])
@@ -56,14 +54,21 @@ int main(int argc, char *argv[])
   }
 
   // Set up signals
-  struct sigaction SIGINT_action ={0}, SIGTSTP_action = {0}, ignore_action = {0};
+  struct sigaction SIGINT_action ={0}, ignore_action = {0}, oldact = {0};
   // no signal handling unless interactive mode (stdin)
   ignore_action.sa_handler = SIG_IGN;
-  // Ignore SIGTSTPif in interactive mode
-  if (input == stdin) {
-    // Ignore SIGTSTP
-    sigaction(SIGTSTP, &ignore_action, NULL);
-  }
+  oldact.sa_handler = SIG_IGN;
+  // set sig handler to when reading line of input in interactive mode
+  SIGINT_action.sa_handler = handle_SIGINT;
+  // Block all catchable signals while handle_SIGINT is running
+  sigfillset(&SIGINT_action.sa_mask);
+  // No flags set
+  SIGINT_action.sa_flags = 0;
+
+
+  // Ignore SIGTSTP and SIGINT
+  sigaction(SIGTSTP, &ignore_action, &oldact);
+  sigaction(SIGINT, &ignore_action, &oldact);
 
   // Initialize line and n 
   char *line = NULL;
@@ -79,67 +84,44 @@ start:
     int append_flag = 0;
     // clear prev array
     memset(words, 0, sizeof(words));
+    // Manage background processes
+    manageBackgroundProcesses();
     
-    /* 
-      Manage background processes 
-    */
-    // check if process has completed. WNOHANG doesn't block the parent process
-    while ((background_child = waitpid(0, &childExitStatus, WUNTRACED | WNOHANG)) > 0) {
-      // if greater than 0 a child process has completed. 
-      if (WIFEXITED(childExitStatus)) {
-        fprintf(stderr, "Child process %jd done. Exit status %d.\n", (intmax_t) background_child, WEXITSTATUS(childExitStatus));
-      }
-      if (WIFSTOPPED(childExitStatus)) {
-        kill(background_child, SIGCONT);
-        fprintf(stderr, "Child process %jd stopped. Continuing.\n", (intmax_t) background_child);
-      }
-      if (WIFSIGNALED(childExitStatus)) {
-        fprintf(stderr, "Child process %jd done. Signaled %d.\n", (intmax_t) background_child, WTERMSIG(childExitStatus));
-      }
-    }
     
-    /* Interactive mode Prompt and SIGINT settings*/
+    /* Interactive mode Prompt */
     if (input == stdin) {
-      // set PS!
+      // catch signals for line read
+      sigaction(SIGINT, &SIGINT_action, NULL);
       char *PS1 = getenv("PS1");
       if (PS1 == NULL){
         PS1 = "";
       }
       fprintf(stderr, "%s", PS1);
-
-      // set sig handler to when reading line of input
-      SIGINT_action.sa_handler = handle_SIGINT;
-      // Block all catchable signals while handle_SIGINT is running
-      sigfillset(&SIGINT_action.sa_mask);
-      // No flags set
-      SIGINT_action.sa_flags = 0;
-      sigaction(SIGINT, &SIGINT_action, NULL);
     }
 
     // read line
     ssize_t line_len = getline(&line, &n, input);
-
-    // if line blocked by a signal
-      //errno=EINTR
-      // CLEARERR()
-      // \n
-      // goto start
-
+    // check for blocked signaland ignore again
+    // sigaction(SIGINT, &ignore_action, NULL);
+    if (input == stdin) {
+      sigaction(SIGINT, &ignore_action, NULL);
+      if (errno == EINTR) {
+        clearerr(input); // ??
+        errno = 0;
+        fprintf(stderr, "\n");
+        goto start;
+      }
+    }
+    
     // exit if file is at end
     if ((line_len < 0) && (feof(input))) {
       exit(atoi(foreground_pid));
     }
     if (line_len < 0) err(1, "%s", input_fn);  
-
-    // Ignore SIGINT again
-    if (input == stdin) {
-      sigaction(SIGINT, &ignore_action, NULL);
-    }
     
     // split and expand words
     size_t nwords = wordsplit(line);
     for (size_t i = 0; i < nwords; ++i) {
-      //fprintf(stderr, "Word %zu: %s\n", i, words[i]);
       char *exp_word = expand(words[i]);
       free(words[i]);
       words[i] = exp_word;
@@ -154,7 +136,6 @@ start:
         free(words[i]);
         words[i] = new_word;
       }
-      //fprintf(stderr, "Expanded Word %zu: %s\n", i, words[i]);
     }
 
     // ignore all below code if no words were entered
@@ -206,11 +187,6 @@ start:
       else{ i++; }
     }
 
-    // ignore all below code if no words were entered
-    if (nwords == 0) {
-      goto start;
-    }
-
     /* 
     HANDLE COMMANDS. exit, cd, or all others
     */
@@ -257,14 +233,10 @@ start:
           break;
         }
         case 0: {
-          /*
-            CHILD PROCESS
-          */
-
+          // CHILD PROCESS
           // Reset signals for child
-          ///
-          /// oldact in SIGACTION(2).
-          //
+          sigaction(SIGTSTP, &oldact, NULL);
+          sigaction(SIGINT, &oldact, NULL);
 
           // check for input file
           if (input_file != NULL) {
@@ -314,30 +286,34 @@ start:
         }
 
         default: {
-          // Parent process
+          // PARENT PROCESS
           // wait for child to process command if foreground
           if (background_flag == 0) {
-            spawn_pid = waitpid(spawn_pid, &childExitStatus, 0);
+            spawn_pid = waitpid(spawn_pid, &childExitStatus, WUNTRACED);
             foreground_pid = malloc(sizeof(int) * 8);
             if (WIFEXITED(childExitStatus)) {
               sprintf(foreground_pid, "%d", WEXITSTATUS(childExitStatus));
             } 
             else if (WIFSIGNALED(childExitStatus)) {
-              sprintf(foreground_pid, "%d", 128 + WSTOPSIG(childExitStatus));
+              sprintf(foreground_pid, "%d", 128 + WTERMSIG(childExitStatus));
             }
+            else if (WIFSTOPPED(childExitStatus)) {
+              kill(spawn_pid, SIGCONT);
+              fprintf(stderr, "Child process %jd stopped. Continuing.\n", (intmax_t) spawn_pid);
+              background_pid = malloc(sizeof(int) * 8);
+              sprintf(background_pid, "%d", spawn_pid);
+            }
+
           } else {
             // background
             background_pid = malloc(sizeof(int) * 8);
-            sprintf(background_pid, "%d", WEXITSTATUS(childExitStatus));
+            sprintf(background_pid, "%d", spawn_pid);
           }
         }
       }
     }
   }
 } 
-
-char *words[MAX_WORDS] = {0}; // is this needed??? from starter code
-
 
 /* Splits a string into words delimited by whitespace. Recognizes
  * comments as '#' at the beginning of a word, and backslash escapes.
@@ -484,4 +460,24 @@ void condenseArray(int index, char * words[MAX_WORDS], int length) {
   // update last 2 to be null for removed values. no need to update length since NULL values
   words[index] = NULL;
   words[index+1] = NULL;
+}
+
+/* 
+  Manage background processes 
+*/
+// check if process has completed. WNOHANG doesn't block the parent process
+void manageBackgroundProcesses() {
+  while ((background_child = waitpid(0, &childExitStatus, WUNTRACED| WNOHANG)) > 0) {
+    // if greater than 0 a child process has completed. 
+    if (WIFEXITED(childExitStatus)) {
+      fprintf(stderr, "Child process %jd done. Exit status %d.\n", (intmax_t) background_child, WEXITSTATUS(childExitStatus));
+    }
+    if (WIFSTOPPED(childExitStatus)) {
+      kill(background_child, SIGCONT);
+      fprintf(stderr, "Child process %jd stopped. Continuing.\n", (intmax_t) background_child);
+    }
+    if (WIFSIGNALED(childExitStatus)) {
+      fprintf(stderr, "Child process %jd done. Signaled %d.\n", (intmax_t) background_child, WTERMSIG(childExitStatus));
+    }
+  }
 }
