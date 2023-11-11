@@ -35,8 +35,6 @@ size_t wordsplit(char const *line);
 char * expand(char const *word);
 void condenseArray(int index, char * words[MAX_WORDS], int length);
 void manageBackgroundProcesses();
-
-
 void handle_SIGINT(int signo){}
 
 /* MAIN FUNCTION */
@@ -55,7 +53,6 @@ int main(int argc, char *argv[])
 
   // Set up signals
   struct sigaction SIGINT_action ={0}, ignore_action = {0}, oldact = {0};
-  // no signal handling unless interactive mode (stdin)
   ignore_action.sa_handler = SIG_IGN;
   oldact.sa_handler = SIG_IGN;
   // set sig handler to when reading line of input in interactive mode
@@ -64,7 +61,6 @@ int main(int argc, char *argv[])
   sigfillset(&SIGINT_action.sa_mask);
   // No flags set
   SIGINT_action.sa_flags = 0;
-
 
   // Ignore SIGTSTP and SIGINT
   sigaction(SIGTSTP, &ignore_action, &oldact);
@@ -81,10 +77,9 @@ start:
     expanded_param_flag = 0;
     input_file = NULL;
     output_file = NULL;
-    int append_flag = 0;
     // clear prev array
     memset(words, 0, sizeof(words));
-    // Manage background processes
+    // Manage background processes and check if finished/exited
     manageBackgroundProcesses();
     
     
@@ -102,7 +97,6 @@ start:
     // read line
     ssize_t line_len = getline(&line, &n, input);
     // check for blocked signaland ignore again
-    // sigaction(SIGINT, &ignore_action, NULL);
     if (input == stdin) {
       sigaction(SIGINT, &ignore_action, NULL);
       if (errno == EINTR) {
@@ -143,21 +137,7 @@ start:
       goto start;
     }
 
-    /* 
-      Check for special characters &, <, >, >>.
-    */
-    // check if it should be a background porocess by & at end of line
-    if (strcmp(words[nwords-1], "&") == 0) {
-      background_flag = 1;
-      free(words[nwords-1]);
-      words[nwords -1] = NULL;
-      // decrement for word that was removed
-      nwords--;
-    } else {
-      background_flag = 0;
-    }
-
-    // check for redirection <, >, or >> as a word
+    // check for redirection <, >, or >>
     // check for output redirection.
     int i = 0;
     while (i < nwords-1) {
@@ -169,13 +149,6 @@ start:
         condenseArray(j, words, nwords);
         nwords = nwords -2;
       } 
-      else if (strcmp(words[i], ">") == 0) {
-        // output to file
-        output_file = words[i+1];
-        // now move elements forwards so null values are at end
-        condenseArray(j, words, nwords);
-        nwords = nwords -2;
-      }
       else if (strcmp(words[i], ">>") == 0) {
         // append to file
         output_file = words[i+1];
@@ -184,7 +157,29 @@ start:
         nwords = nwords -2;
         append_flag = 1;
       }
+      else if (strcmp(words[i], ">") == 0) {
+        // output to file
+        output_file = words[i+1];
+        // now move elements forwards so null values are at end
+        condenseArray(j, words, nwords);
+        nwords = nwords -2;
+        append_flag = 0;
+      }
       else{ i++; }
+    }
+
+    /* 
+      Check for background process character &
+    */
+    // check if it should be a background porocess by & at end of line
+    if (strcmp(words[nwords-1], "&") == 0) {
+      background_flag = 1;
+      free(words[nwords-1]);
+      words[nwords -1] = NULL;
+      // decrement for word that was removed
+      nwords--;
+    } else {
+      background_flag = 0;
     }
 
     /* 
@@ -257,7 +252,8 @@ start:
           if (output_file != NULL) {
             if (append_flag == 0) {
               targetFD = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0777);
-            } else {
+            } 
+            else if (append_flag == 1) {
               targetFD = open(output_file, O_WRONLY | O_CREAT | O_APPEND, 0777);
             }
             if (targetFD == -1) {
@@ -298,6 +294,7 @@ start:
               sprintf(foreground_pid, "%d", 128 + WTERMSIG(childExitStatus));
             }
             else if (WIFSTOPPED(childExitStatus)) {
+              // If stoped change to a background process
               kill(spawn_pid, SIGCONT);
               fprintf(stderr, "Child process %jd stopped. Continuing.\n", (intmax_t) spawn_pid);
               background_pid = malloc(sizeof(int) * 8);
