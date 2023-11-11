@@ -1,5 +1,0 @@
-printf test\\n > testfile.txt
-printf Hello\ World!\\n > infile.txt
-printf asdfhjkl > garbagefile.txt
-cat < infile.txt >> testfile.txt > garbagefile.txt > outfile.txt
-cat testfile.txt infile.txt garbagefile.txt outfile.txt
